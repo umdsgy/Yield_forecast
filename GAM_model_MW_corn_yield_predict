@@ -1,0 +1,111 @@
+library(dplyr)
+library(tidyr)
+library(pracma)
+library(lme4)
+library(splines2)
+library(mgcv)
+set.seed(123)
+
+
+# mdir = 'D:/study/postdoc_research/Yield_prediction/test'
+mdir = '/gpfs/data1/cmongp1/Guanyuan/County_yield/Acres/annual'
+setwd(mdir)
+
+
+df = fread('united_states_of_america_Corn_acres_final.csv', header = T)
+df = df[which(df$Year > 2002), ]
+df = na.omit(df)
+
+
+global_trend_model = lm(yield ~ Year, data = df)
+
+df = df %>%
+  mutate(global_trend = predict(global_trend_model)) %>%
+  mutate(yield_anomaly = yield - global_trend)
+
+cols_to_remove = grep("biweek(1|2|3|4|5|6|7|8|17|18|19|20|21|22|23|24|25|26)$", colnames(df), value = TRUE)
+
+df = df %>%
+  select(-all_of(cols_to_remove))
+
+# MW_states = c('Illinois', 'Indiana', 'Iowa', 'Kansas', 'Michigan',
+#               'Minnesota', 'Missouri', 'Nebraska', 'North Dakota', 'Ohio', 'South Dakota', 
+#               'Wisconsin')
+
+df$states = df$FIPS %/% 1000
+
+MW_states = c(17, 18, 19, 20, 26, 27,29,31,38,39,46,55)
+
+df = df[which(df$states %in% MW_states), ]
+
+df = df[which(df$Year < 2017), ]
+
+df = df %>% select(-states)
+
+dependent.variable.name = 'yield_anomaly'
+
+predictors = grep("biweek", colnames(df), value = T)
+
+k_value = 3  
+
+
+spline_predictors = grep("^esi|^pr", predictors, value = TRUE)
+poly_predictors = grep("^gcvi", predictors, value = TRUE)
+
+
+poly_degree = 2 
+
+
+spline_terms = paste("s(", spline_predictors, ", bs = 'cr', k = 3)", sep = "", collapse = " + ")
+
+poly_terms = paste("poly(", poly_predictors, ", degree = ", poly_degree, ")", sep = "", collapse = " + ")
+
+all_terms = paste(spline_terms, poly_terms, sep = " + ")
+
+fixed_effects = "FIPS"  
+formula_str = paste("yield_anomaly ~", all_terms, "+", fixed_effects)
+
+
+formula = as.formula(formula_str)
+
+df$FIPS = as.factor(df$FIPS)
+
+ys = sort(unique(df$Year))
+
+out_df = as.data.frame(matrix(NA, nrow = 0, ncol = 7))
+
+colnames(out_df) = c("fit",  'se.fit',"Year", "obs", 'yield_anomaly', 'global_trend','FIPS')
+
+for (j in 1:length(ys)) {
+  print(ys[j])
+  
+  df_train = df[which(df$Year != ys[j]), ]
+  
+  df_test = df[which(df$Year == ys[j]), ]
+  
+  model = bam(formula, data = df_train, cluster = 4)
+  
+  df_test = df_test[df_test$FIPS %in% df_train$FIPS, ]
+  
+  predicted = predict.gam(model, df_test, se = T)
+  
+  pred_df = as.data.frame(predicted)
+  pred_df$Year = ys[j]
+  pred_df$obs = df_test$yield
+  pred_df$yield_anomaly = df_test$yield_anomaly
+  pred_df$global_trend = df_test$global_trend
+  pred_df$FIPS = df_test$FIPS
+  
+  out_df = rbind.data.frame(out_df, pred_df)
+  
+  
+}
+
+out_df$state = out_df$FIPS%/%1000
+
+r2 = out_df %>%
+  group_by(Year) %>%
+  summarize(r2 = cor(fit, yield_anomaly)^2) %>%
+  ungroup()
+
+print(paste0("median r2 is: ", as.character(round(r2$r2, digits = 2))))
